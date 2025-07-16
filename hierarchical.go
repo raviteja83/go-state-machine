@@ -1,6 +1,9 @@
 package statemachine
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 type HierarchicalMachine struct {
 	*Machine
@@ -12,6 +15,49 @@ func NewHierarchicalMachine(config MachineConfig) *HierarchicalMachine {
 	return &HierarchicalMachine{
 		Machine:    m,
 		stateStack: []string{},
+	}
+}
+
+func (hm *HierarchicalMachine) Start() error {
+	hm.mu.Lock()
+	if hm.running {
+		hm.mu.Unlock()
+		return fmt.Errorf("machine %s is already running", hm.ID)
+	}
+	hm.running = true
+	hm.mu.Unlock()
+
+	initial := hm.State.Get()["root"]
+	if node := hm.findStateNode(initial); node != nil {
+		hm.executeActions(node.Entry)
+	}
+	
+	// Initialize compound states properly
+	hm.mu.Lock()
+	hm.initializeCompoundState(initial)
+	hm.mu.Unlock()
+
+	go hm.eventLoop()
+	return nil
+}
+
+func (hm *HierarchicalMachine) initializeCompoundState(stateID string) {
+	node := hm.findStateNode(stateID)
+	if node == nil {
+		return
+	}
+	
+	if node.Type == CompoundState && node.Initial != "" {
+		hm.State.Set("root", node.Initial)
+		
+		// Execute entry actions for the initial state
+		initialNode := hm.findStateNode(node.Initial)
+		if initialNode != nil && initialNode.Entry != nil {
+			hm.executeActions(initialNode.Entry)
+		}
+		
+		// Recursively initialize if it's also a compound state
+		hm.initializeCompoundState(node.Initial)
 	}
 }
 
@@ -49,12 +95,24 @@ func (hm *HierarchicalMachine) processEvent(event Event) {
 					}
 				}
 
-				targetPath := hm.getStatePath(transition.Target)
-				hm.enterStates(targetPath)
-
-				hm.State.Set(path, transition.Target)
-				transitioned = true
-				break
+				targetNode := hm.findStateNode(transition.Target)
+				if targetNode != nil {
+					hm.State.Set(path, transition.Target)
+					
+					// Enter the target state
+					if targetNode.Entry != nil {
+						hm.executeActions(targetNode.Entry)
+					}
+					
+					// If it's a compound state, enter its initial state
+					if targetNode.Type == CompoundState && targetNode.Initial != "" {
+						hm.State.Set(path, targetNode.Initial)
+						hm.initializeCompoundState(targetNode.Initial)
+					}
+					
+					transitioned = true
+					break
+				}
 			}
 		}
 	}
@@ -112,8 +170,38 @@ func (hm *HierarchicalMachine) enterStates(states []string) {
 			
 			if node.Type == CompoundState && node.Initial != "" {
 				childPath := hm.getStatePath(node.Initial)
-				hm.enterStates(childPath[len(states):])
+				// Only enter child states that are not already in the path
+				if len(childPath) > len(states) {
+					hm.enterStates(childPath[len(states):])
+				}
 			}
+		}
+	}
+}
+
+func (hm *HierarchicalMachine) Send(event Event) error {
+	hm.mu.RLock()
+	if !hm.running {
+		hm.mu.RUnlock()
+		return fmt.Errorf("machine %s is not running", hm.ID)
+	}
+	hm.mu.RUnlock()
+
+	select {
+	case hm.eventChan <- event:
+		return nil
+	default:
+		return fmt.Errorf("event channel is full")
+	}
+}
+
+func (hm *HierarchicalMachine) eventLoop() {
+	for {
+		select {
+		case event := <-hm.eventChan:
+			hm.processEvent(event)
+		case <-hm.stopChan:
+			return
 		}
 	}
 }

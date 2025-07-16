@@ -1,4 +1,4 @@
-package main
+package examples
 
 import (
 	"fmt"
@@ -13,7 +13,7 @@ type TrafficLightContext struct {
 	IsEmergency  bool
 }
 
-func main() {
+func TrafficLightExample() {
 	config := sm.MachineConfig{
 		ID:      "traffic-light",
 		Initial: "red",

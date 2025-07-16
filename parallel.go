@@ -25,13 +25,14 @@ func (pm *ParallelMachine) initializeRegions() {
 	pm.walkStateTree(pm.Root, func(node *StateNode) {
 		if node.Type == ParallelState {
 			for regionID, regionNode := range node.States {
+				fullRegionID := fmt.Sprintf("%s.%s", node.ID, regionID)
 				regionConfig := MachineConfig{
-					ID:      fmt.Sprintf("%s.%s", node.ID, regionID),
+					ID:      fullRegionID,
 					Initial: regionNode.Initial,
 					Context: pm.Context,
 					States:  regionNode.States,
 				}
-				pm.regions[regionID] = NewMachine(regionConfig)
+				pm.regions[fullRegionID] = NewMachine(regionConfig)
 			}
 		}
 	})
@@ -73,13 +74,25 @@ func (pm *ParallelMachine) Send(event Event) error {
 	}
 	pm.mu.RUnlock()
 	
+	// Send to main machine first
 	if err := pm.Machine.Send(event); err != nil {
 		return err
 	}
 	
-	for _, region := range pm.regions {
-		if err := region.Send(event); err != nil {
-			return fmt.Errorf("failed to send event to region %s: %w", region.ID, err)
+	// Also send to active regions
+	currentStates := pm.State.Get()
+	for _, stateID := range currentStates {
+		node := pm.findStateNode(stateID)
+		if node != nil && node.Type == ParallelState {
+			// Send to all regions of this parallel state
+			for _, region := range pm.regions {
+				if strings.HasPrefix(region.ID, node.ID) {
+					if err := region.Send(event); err != nil {
+						// Log but don't fail - regions might not handle all events
+						continue
+					}
+				}
+			}
 		}
 	}
 	
@@ -99,6 +112,13 @@ func (pm *ParallelMachine) processEvent(event Event) {
 		}
 		
 		if node.Type == ParallelState {
+			// Process the event for all regions first
+			for _, region := range pm.regions {
+				if strings.HasPrefix(region.ID, node.ID) {
+					region.Send(event)
+				}
+			}
+			// Then check if all regions are in final state
 			pm.processParallelState(node, event)
 			continue
 		}
@@ -143,9 +163,10 @@ func (pm *ParallelMachine) processEvent(event Event) {
 }
 
 func (pm *ParallelMachine) processParallelState(node *StateNode, event Event) {
+	// Check if we should process a done transition
 	allRegionsInFinal := true
 	
-	for regionID, region := range pm.regions {
+	for _, region := range pm.regions {
 		if !strings.HasPrefix(region.ID, node.ID) {
 			continue
 		}
@@ -163,16 +184,27 @@ func (pm *ParallelMachine) processParallelState(node *StateNode, event Event) {
 		
 		if !inFinal {
 			allRegionsInFinal = false
+			break
 		}
 	}
 	
 	if allRegionsInFinal {
+		// Check for "done" transitions
 		transitions, exists := node.On["done"]
 		if exists {
 			for _, transition := range transitions {
-				if transition.Guard == nil || transition.Guard(pm.Context, event) {
-					pm.State.Set("root", transition.Target)
-					break
+				if transition.Guard == nil || transition.Guard(pm.Context, Event{Type: "done"}) {
+					targetNode := pm.findStateNode(transition.Target)
+					if targetNode != nil {
+						pm.State.Set("root", transition.Target)
+						
+						if targetNode.Entry != nil {
+							pm.executeActions(targetNode.Entry)
+						}
+						
+						pm.notifyListeners(Event{Type: "done"})
+						break
+					}
 				}
 			}
 		}
@@ -180,7 +212,7 @@ func (pm *ParallelMachine) processParallelState(node *StateNode, event Event) {
 }
 
 func (pm *ParallelMachine) enterParallelState(node *StateNode) {
-	for regionID, regionNode := range node.States {
+	for regionID := range node.States {
 		fullRegionID := fmt.Sprintf("%s.%s", node.ID, regionID)
 		if region, exists := pm.regions[fullRegionID]; exists {
 			region.Start()

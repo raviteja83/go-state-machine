@@ -138,6 +138,12 @@ func (m *Machine) Start() error {
 	}
 
 	go m.eventLoop()
+	
+	// Check always transitions after initial state
+	m.mu.Lock()
+	m.checkAlwaysTransitions()
+	m.mu.Unlock()
+	
 	return nil
 }
 
@@ -221,6 +227,11 @@ func (m *Machine) processEvent(event Event) {
 
 			targetNode := m.findStateNode(transition.Target)
 			if targetNode != nil {
+				// Even if transitioning to the same state, execute exit/entry
+				if stateID == transition.Target && node.Exit != nil {
+					// Already executed exit above
+				}
+				
 				m.State.Set(path, transition.Target)
 				
 				if targetNode.Entry != nil {

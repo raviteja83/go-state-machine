@@ -1,4 +1,4 @@
-package main
+package examples
 
 import (
 	"fmt"
@@ -16,7 +16,7 @@ type ElevatorContext struct {
 	MovingUp      bool
 }
 
-func main() {
+func ElevatorExample() {
 	config := sm.MachineConfig{
 		ID:      "elevator",
 		Initial: "idle",
